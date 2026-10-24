@@ -27,7 +27,7 @@ private final class TerminalRecorder: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private var lastPayload: String?
+    private var payloads: [String] = []
     private var terminals: [Int32] = []
 
     func record(chunk: UnsafeMutablePointer<CChar>?, done: Bool, status: Int32) {
@@ -43,13 +43,13 @@ private final class TerminalRecorder: @unchecked Sendable {
             return
         }
         if let payload {
-            lastPayload = payload
+            payloads.append(payload)
         }
     }
 
     private func decodeLast<T: Decodable>(_ type: T.Type) -> T? {
         lock.lock()
-        let payload = lastPayload
+        let payload = payloads.last
         lock.unlock()
         guard let data = payload?.data(using: .utf8) else {
             return nil
@@ -66,6 +66,21 @@ private final class TerminalRecorder: @unchecked Sendable {
     /// whether that snapshot was marked complete.
     var structured: (json: String, isComplete: Bool)? {
         decodeLast(StructuredSnapshot.self).map { ($0.content.json, $0.isComplete) }
+    }
+
+    /// Every structured snapshot handed to the consumer, in delivery order.
+    var structuredSnapshots: [(json: String, isComplete: Bool)] {
+        lock.lock()
+        let recorded = payloads
+        lock.unlock()
+        return recorded.compactMap { payload in
+            guard let data = payload.data(using: .utf8),
+                  let snapshot = try? JSONDecoder().decode(StructuredSnapshot.self, from: data)
+            else {
+                return nil
+            }
+            return (snapshot.content.json, snapshot.isComplete)
+        }
     }
 
     var terminalStatuses: [Int32] {
@@ -285,6 +300,84 @@ final class StreamOutcomeTests: XCTestCase {
             session.transcript,
             committed,
             "a completed structured response must not be rolled back"
+        )
+    }
+
+    /// A constrained generation whose root is a bare number must reach the
+    /// consumer marked complete.
+    ///
+    /// Scalar roots settle their completeness late: the last partial can
+    /// already carry the final bytes while `isComplete` is still false, and
+    /// only the cached terminal result says the value is finished. A final
+    /// snapshot withheld because its bytes repeat that partial therefore
+    /// leaves the consumer holding nothing complete, and a valid answer is
+    /// rejected as unfinished.
+    ///
+    /// The bridge drives the live stream here instead of taking one the test
+    /// already drained: the edge belongs to the iteration that produces the
+    /// partials, so a pre-drained stream would not exercise it.
+    @available(macOS 26.0, *)
+    func testAScalarNumberRootIsDeliveredAsACompleteSnapshot() async throws {
+        try requireModel()
+
+        let schema = try GenerationSchema(
+            root: DynamicGenerationSchema(type: Int.self),
+            dependencies: []
+        )
+
+        let session = LanguageModelSession(instructions: "Answer with one whole number.")
+        let entriesBefore = session.transcript.count
+
+        let recorder = TerminalRecorder()
+        let context = UInt(bitPattern: Unmanaged.passRetained(recorder).toOpaque())
+        defer {
+            if let pointer = UnsafeMutableRawPointer(bitPattern: context) {
+                Unmanaged<TerminalRecorder>.fromOpaque(pointer).release()
+            }
+        }
+
+        let stream = session.streamResponse(
+            to: "How many legs does a spider have?",
+            schema: schema
+        )
+        await runStructuredStream(
+            session: session,
+            stream: stream,
+            entriesBefore: entriesBefore,
+            context: UnsafeMutableRawPointer(bitPattern: context),
+            callback: recordIntoContext
+        )
+
+        XCTAssertEqual(
+            recorder.terminalStatuses,
+            [FM_OK],
+            "a scalar generation that completed natively must report success, once"
+        )
+
+        let response = try await stream.collect()
+        let snapshots = recorder.structuredSnapshots
+        XCTAssertEqual(
+            snapshots.last?.json,
+            response.content.jsonString,
+            "the last delivered snapshot must be the content Apple cached"
+        )
+        XCTAssertEqual(
+            snapshots.last?.isComplete,
+            true,
+            "a scalar root must reach the consumer marked complete"
+        )
+        XCTAssertEqual(
+            snapshots.filter { $0.isComplete && $0.json == response.content.jsonString }.count,
+            1,
+            "the complete snapshot must be delivered once, not repeated"
+        )
+        let decoded = try? JSONSerialization.jsonObject(
+            with: Data(response.content.jsonString.utf8),
+            options: [.fragmentsAllowed]
+        )
+        XCTAssertTrue(
+            decoded is NSNumber,
+            "an integer root must arrive as a bare JSON number, got \(response.content.jsonString)"
         )
     }
 }

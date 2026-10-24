@@ -12,16 +12,7 @@ Upstream value: a clone of the repository builds. Upstream may prefer to restore
 
 ## 2. Asynchronous, cancellable generation streams
 
-New module `src/stream.rs` (Cargo feature `async`) plus two methods on `LanguageModelSession`:
-
-```rust
-let mut generation = session.stream_text(prompt, GenerationOptions::new())?;
-let handle = generation.handle();
-while let Some(update) = generation.next().await {
-    match update? { /* Chunk / Replace / Snapshot */ }
-}
-handle.settled().await;
-```
+New module `src/stream.rs` (Cargo feature `async`) and `LanguageModelSession::{stream_text, stream_generated_async}` provide cancellable generation:
 
 - `Generation::next` is an ordinary `Future`; it parks no thread and needs no async runtime. The crate stays executor-agnostic: the implementation uses `std` wakers only and adds no dependency.
 - `GenerationHandle` is `Clone + Send + Sync + 'static`. It carries `cancel()`, `is_cancelled()`, `settled()` and `is_settled()`, so a consumer can drop the stream and still await native settlement — the hook a host needs for a truthful `dispose()`.
@@ -42,6 +33,7 @@ A cancelled stream's terminal callback arrives _before_ FoundationModels has rel
 - `SwiftTask` exposes cancellation and settlement registration to the crate.
 - The outcome of a stream is decided by its own cached terminal result, `ResponseStream.collect()`, not by `Task.isCancelled` sampled after the loop. A direct macOS 27.0 probe showed why: a cancellation delivered after the generation finished still sets `Task.isCancelled`, while `collect()` returns the cached success and the response stays legitimately committed — the old classification then waited for a rollback that could never happen, forever. `collect()` is consulted even when iteration threw, so an aborted iteration is still diagnosed from the framework's own answer. Only a genuine `CancellationError` leaves cleanup owed, and the bridge waits for it.
 - When iteration stopped before the final snapshot but `collect()` reports success, the cached full response is delivered before the success terminal, so a consumer told "success" can never be holding a prefix.
+- A final structured snapshot is delivered when completeness changes, even if its JSON bytes do not. Numeric scalar roots can have their final bytes in a partial snapshot; `collect()` establishes completion, which must reach the consumer before the success terminal.
 - Bridge encoding failures stay distinct from native outcomes: they are reported as the terminal and never replaced by, or swallowed into, a native success.
 
 Upstream value: fixes a per-request leak and gives any consumer a settlement signal; `fm_task_await_settled` is additive FFI.

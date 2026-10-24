@@ -315,6 +315,7 @@ func runStructuredStream(
     callback: FMStreamCallback
 ) async {
     var delivered: String?
+    var deliveredComplete = false
     var encodingFailure: Error?
     do {
         for try await snapshot in stream {
@@ -326,6 +327,7 @@ func runStructuredStream(
                 ))
                 callback(context, ffiString(payload), false, FM_OK)
                 delivered = snapshot.content.jsonString
+                deliveredComplete = snapshot.content.isComplete
             } catch {
                 encodingFailure = error
                 break
@@ -341,7 +343,11 @@ func runStructuredStream(
             report(encodingFailure, context: context, callback: callback)
             return
         }
-        if delivered != response.content.jsonString {
+        // Repeating the last partial's bytes is still worth a snapshot when
+        // that partial was not complete: a scalar root keeps `isComplete`
+        // false until the terminal result settles it, so bytes alone would
+        // leave a consumer told "success" with nothing it may decode.
+        if delivered != response.content.jsonString || !deliveredComplete {
             do {
                 let payload = try encodeBridge(structuredSnapshot(
                     content: response.content,
