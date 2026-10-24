@@ -27,9 +27,20 @@ jobs:
         with:
           toolchain: stable
           components: clippy
+      # `libswift_Concurrency` entered macOS at 12.0. Built below that floor,
+      # the linker resolves it to the toolchain's back-deployment copy, whose
+      # install name is `@rpath/libswift_Concurrency.dylib`. Build, lint and
+      # test at the floor the macOS-gated features already require, so these
+      # executables link the system Swift runtime in `/usr/lib/swift`.
       - run: cargo build --all-targets --all-features
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "27.0"
       - run: cargo clippy --all-targets --all-features -- -D warnings
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "27.0"
       - run: cargo test --all-features
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "27.0"
       - name: Swift bridge tests
         run: |
           sw_vers

@@ -105,10 +105,12 @@ swift test --package-path swift-bridge \
 FM_REQUIRE_MODEL=1 swift test --package-path swift-bridge \
   -Xswiftc -DFOUNDATION_MODELS_HAS_MACOS26_SDK \
   -Xswiftc -DFOUNDATION_MODELS_HAS_MACOS27_SDK
-cargo test --features async,macos_26_0,macos_27_0
-cargo test --features async,macos_26_0,macos_27_0 -- --ignored --test-threads=1
-cargo run --release --features async,macos_26_0,macos_27_0 --example 10_async_stream_smoke
-cargo clippy --all-features --all-targets -- -D warnings
+MACOSX_DEPLOYMENT_TARGET=27.0 cargo test --features async,macos_26_0,macos_27_0
+MACOSX_DEPLOYMENT_TARGET=27.0 cargo test --features async,macos_26_0,macos_27_0 -- --ignored --test-threads=1
+MACOSX_DEPLOYMENT_TARGET=27.0 cargo run --release --features async,macos_26_0,macos_27_0 --example 10_async_stream_smoke
+MACOSX_DEPLOYMENT_TARGET=27.0 cargo clippy --all-features --all-targets -- -D warnings
 ```
+
+Every `cargo` line carries `MACOSX_DEPLOYMENT_TARGET=27.0` because the deployment floor decides which Swift Concurrency library the linker picks. `libswift_Concurrency` entered macOS at 12.0; below that floor the linker resolves it to the toolchain's back-deployment copy, whose install name is `@rpath/libswift_Concurrency.dylib`. This package's own tests and examples still run there, because `build.rs` bakes an `/usr/lib/swift` rpath into _this package's_ targets — but `cargo:rustc-link-arg` is not transitive, so a consumer's executable built below the floor carries no such rpath and dyld aborts it at startup. At 27.0 these commands produce executables that reference `/usr/lib/swift/libswift_Concurrency.dylib` directly, which is what a consumer's binary must do.
 
 `tests/async_stream.rs` is live evidence and is only run on request; `examples/10_async_stream_smoke.rs` is the same evidence as a program: it exits non-zero instead of skipping, and it proves the macOS 27 quota mapping against an error the framework really throws by overflowing the context window. The first `swift test` line is the deterministic suite plus a visible skip; the `FM_REQUIRE_MODEL=1` line is the live one and fails rather than skipping.
