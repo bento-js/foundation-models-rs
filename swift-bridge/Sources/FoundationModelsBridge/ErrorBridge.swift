@@ -4,6 +4,14 @@ import Foundation
 import FoundationModels
 #endif
 
+/// The C callback a streaming request delivers snapshots and its terminal to.
+typealias FMStreamCallback = @convention(c) (
+    UnsafeMutableRawPointer?,
+    UnsafeMutablePointer<CChar>?,
+    Bool,
+    Int32
+) -> Void
+
 #if canImport(FoundationModels) && FOUNDATION_MODELS_HAS_MACOS26_SDK
 @available(macOS 26.0, *)
 func writeErrorOut(
@@ -177,13 +185,22 @@ func finishStream(
     }
 }
 
+/// Wait for `FoundationModels` to release a cancelled request.
+///
+/// A request issued before the framework has rolled the transcript back traps
+/// inside the framework, so this wait is required. Cancelling a stream makes
+/// it return normally rather than throwing, and the rollback happens
+/// afterwards: a probe on macOS 27.0 saw `isResponding` already false while
+/// the transcript still held the request, with the entries disappearing about
+/// ten milliseconds later. Both signals must therefore settle.
+///
+/// There is deliberately no deadline after which this reports a wind-down it
+/// has not observed; a host that needs a bound applies its own shutdown
+/// timeout and reports a timeout instead of claiming native completion.
 @available(macOS 26.0, *)
 func settleCancelledStream(_ session: LanguageModelSession, entriesBefore: Int) async {
     await Task.detached {
-        for _ in 0..<200 {
-            if session.transcript.count <= entriesBefore {
-                return
-            }
+        while session.isResponding || session.transcript.count > entriesBefore {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
     }.value
@@ -216,6 +233,187 @@ func streamTextResponse(
         let (code, message) = mapError(error, lease: lease)
         callback(context, ffiString(message), true, code)
         return cancelled
+    }
+}
+
+/// Run a text stream and perform whatever cleanup its outcome requires.
+///
+/// The cdecl and the bridge's own tests go through this one function, so the
+/// decision about cleanup is exercised by tests rather than duplicated.
+///
+/// `Task.isCancelled` is not evidence that the framework aborted anything: a
+/// cancellation delivered after the generation finished leaves a legitimately
+/// committed response behind, and waiting for that transcript to shrink waits
+/// forever. The stream's own cached terminal result decides the outcome.
+@available(macOS 26.0, *)
+func runTextStream(
+    session: LanguageModelSession,
+    stream: LanguageModelSession.ResponseStream<String>,
+    entriesBefore: Int,
+    context: UnsafeMutableRawPointer?,
+    callback: FMStreamCallback
+) async {
+    var delivered: String?
+    var encodingFailure: Error?
+    do {
+        for try await snapshot in stream {
+            do {
+                let payload = try encodeBridge(BridgeTextStreamSnapshot(content: snapshot.content))
+                callback(context, ffiString(payload), false, FM_OK)
+                delivered = snapshot.content
+            } catch {
+                // A bridge encoding failure is ours, not the model's; it must
+                // not be reported as a native outcome or swallowed by one.
+                encodingFailure = error
+                break
+            }
+        }
+    } catch {
+        // Iteration errors are diagnosed below from the cached terminal.
+    }
+
+    do {
+        let response = try await stream.collect()
+        if let encodingFailure {
+            report(encodingFailure, context: context, callback: callback)
+            return
+        }
+        if delivered != response.content {
+            // Iteration stopped before the last snapshot, so hand over the
+            // complete answer: a consumer told "success" must not hold a prefix.
+            do {
+                let payload = try encodeBridge(BridgeTextStreamSnapshot(content: response.content))
+                callback(context, ffiString(payload), false, FM_OK)
+            } catch {
+                report(error, context: context, callback: callback)
+                return
+            }
+        }
+        callback(context, nil, true, FM_OK)
+    } catch {
+        await failStream(
+            reporting: encodingFailure ?? error,
+            nativeOutcome: error,
+            session: session,
+            entriesBefore: entriesBefore,
+            context: context,
+            callback: callback
+        )
+    }
+}
+
+/// Run a structured stream and perform whatever cleanup its outcome requires.
+///
+/// Same outcome rule as [`runTextStream`]: the cached terminal result decides,
+/// not `Task.isCancelled`.
+@available(macOS 26.0, *)
+func runStructuredStream(
+    session: LanguageModelSession,
+    stream: LanguageModelSession.ResponseStream<GeneratedContent>,
+    entriesBefore: Int,
+    context: UnsafeMutableRawPointer?,
+    callback: FMStreamCallback
+) async {
+    var delivered: String?
+    var encodingFailure: Error?
+    do {
+        for try await snapshot in stream {
+            do {
+                let payload = try encodeBridge(structuredSnapshot(
+                    content: snapshot.content,
+                    rawContent: snapshot.rawContent,
+                    isComplete: snapshot.content.isComplete
+                ))
+                callback(context, ffiString(payload), false, FM_OK)
+                delivered = snapshot.content.jsonString
+            } catch {
+                encodingFailure = error
+                break
+            }
+        }
+    } catch {
+        // Iteration errors are diagnosed below from the cached terminal.
+    }
+
+    do {
+        let response = try await stream.collect()
+        if let encodingFailure {
+            report(encodingFailure, context: context, callback: callback)
+            return
+        }
+        if delivered != response.content.jsonString {
+            do {
+                let payload = try encodeBridge(structuredSnapshot(
+                    content: response.content,
+                    rawContent: response.rawContent,
+                    isComplete: true
+                ))
+                callback(context, ffiString(payload), false, FM_OK)
+            } catch {
+                report(error, context: context, callback: callback)
+                return
+            }
+        }
+        callback(context, nil, true, FM_OK)
+    } catch {
+        await failStream(
+            reporting: encodingFailure ?? error,
+            nativeOutcome: error,
+            session: session,
+            entriesBefore: entriesBefore,
+            context: context,
+            callback: callback
+        )
+    }
+}
+
+@available(macOS 26.0, *)
+private func structuredSnapshot(
+    content: GeneratedContent,
+    rawContent: GeneratedContent,
+    isComplete: Bool
+) -> BridgeStructuredStreamSnapshot {
+    BridgeStructuredStreamSnapshot(
+        content: BridgeGeneratedContent(json: content.jsonString, generationID: nil),
+        rawContent: BridgeGeneratedContent(json: rawContent.jsonString, generationID: nil),
+        isComplete: isComplete
+    )
+}
+
+/// Report a failure that did not come from the model, such as a bridge
+/// encoding error. No native cleanup is owed for one.
+@available(macOS 26.0, *)
+private func report(
+    _ error: Error,
+    context: UnsafeMutableRawPointer?,
+    callback: FMStreamCallback
+) {
+    let (code, message) = mapError(error)
+    callback(context, ffiString(message), true, code)
+}
+
+/// Report a stream's terminal failure and wait out the cleanup it owes.
+///
+/// `reporting` is what the consumer is told, which is the bridge's own failure
+/// when it had one — an encoding error is never swallowed by a native outcome.
+/// `nativeOutcome` decides the cleanup: only a genuine `CancellationError`
+/// leaves a rollback pending, and the bridge waits for it rather than guessing
+/// a deadline.
+@available(macOS 26.0, *)
+private func failStream(
+    reporting reported: Error,
+    nativeOutcome: Error,
+    session: LanguageModelSession,
+    entriesBefore: Int,
+    context: UnsafeMutableRawPointer?,
+    callback: FMStreamCallback
+) async {
+    let lease = BridgeLease()
+    let (code, message) = mapError(reported, lease: lease)
+    callback(context, ffiString(message), true, code)
+    lease.end()
+    if nativeOutcome is CancellationError {
+        await settleCancelledStream(session, entriesBefore: entriesBefore)
     }
 }
 #endif

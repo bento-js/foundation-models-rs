@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Changes on the `bento/prompt-api` fork branch, kept narrow for eventual upstream contribution. See [PATCHES.md](PATCHES.md) for the per-change rationale.
+
+### Added
+
+- `LanguageModelSession::{stream_text, stream_generated_async}` (feature `async`) return a `Generation`: a future-based, cancellable stream over Apple's `streamResponse`. `GenerationHandle` is cloneable, outlives the stream, and exposes `cancel`, `is_cancelled`, `settled` and `is_settled`. Transport buffering is bounded by `stream::BOUNDED_UPDATE_CAPACITY`; because Apple's snapshots are cumulative a slow consumer coalesces snapshots instead of blocking the model or losing text. The delivered text is tracked inside the transport, so coalescing cannot hide a rewrite of already-delivered output: it still arrives as `GenerationUpdate::Replace`, even when a later snapshot restores the prefix. This is the `AsyncSequence` stream that `async_api` recorded as deferred.
+- `fm_task_await_settled` and `fm_task_is_settled` report when a bridge task's body has finished. A cancelled stream's terminal callback arrives *before* `FoundationModels` releases the request, so the callback is not proof that the native session may be reused or released; the new acknowledgement is.
+- Feature `macos_27_0` maps macOS 27's typed error families to typed `FMError` variants instead of `FMError::Unknown`: `LanguageModelError` (context size, rate limiting, guardrail, refusal, unsupported capability, unsupported transcript content, unsupported guide, unsupported locale, timeout), `SystemLanguageModel.Error.assetsUnavailable`, `LanguageModelSession.Error.{concurrentRequests, transcriptMutationWhileResponding}` and `GeneratedContent.ParsingError`. New variants: `UnsupportedCapability`, `UnsupportedTranscriptContent`, `Timeout`, `TranscriptMutationWhileResponding`. `FMError::language_model_error_details()` carries Apple's `contextSize`, `tokenCount` and capability name.
+- `swift test` coverage inside the bridge: authentic Apple error values through the real `mapError`, and the task handle's lifecycle races (a body that finishes before its task is attached, cancellation requested before the task exists, exactly-once settlement, and a null handle).
+
+### Fixed
+
+- `FMTaskHandle` and its `Task` retained each other for the life of the process, leaking one handle and one task per request. The handle now releases its task when the body completes, and no longer adopts a task after the body has already finished.
+- A cancelled stream's cleanup gave up after two seconds and then reported success it had not observed. Cancelling makes the stream return normally rather than throw, and the rollback lands afterwards: a macOS 27.0 probe saw `isResponding` already false while the transcript still held the cancelled request, with the entries disappearing about ten milliseconds later. The bridge now waits for both signals and imposes no deadline of its own, leaving the bound to the host, which can report a timeout instead of claiming native completion.
+- A cancellation delivered after a stream's generation had already finished was still classified as a cancellation, because the bridge sampled `Task.isCancelled` after its iteration loop. The committed response then never disappeared from the transcript, so the cleanup wait never ended, and the consumer was told the generation was cancelled when it had succeeded. The outcome now comes from the stream's own cached terminal result (`ResponseStream.collect()`), consulted even when iteration threw; only a genuine `CancellationError` owes cleanup. If iteration stopped before the final snapshot while `collect()` reports success, the cached full response is delivered before the success terminal, so a consumer told "success" cannot be holding a prefix. Bridge encoding failures remain distinct from native outcomes.
+- Waker call-outs ran while a transport or settlement lock was held: `poll_next` and `poll_settled` cloned the caller's waker under the lock and dropped the one it replaced there too, and releasing an abandoned settlement waiter dropped its waker under the lock. `RawWakerVTable` entries are arbitrary consumer code, so a waker whose clone or drop asked the handle a question deadlocked, and a waker that waited on settlement blocked the native callback trying to deliver the terminal. Every clone, drop and wake now happens with no lock held; registration clones first and re-checks the state under the lock so no wake is missed, and stale wakers are taken out under the lock and dropped after it is released.
+- `ConfiguredSystemLanguageModel` is `Send`/`Sync` (a retained Swift object with thread-safe reference counting), so its `token_count*` futures are `Send` and can be held across an `await` in a spawned task. The `clippy::future_not_send` suppressions are gone.
+
+### Changed
+
+- `doom-fish-utils` resolves from the registry instead of a sibling path that exists only in the upstream author's workspace, so a clone — and a Git dependency on this repository — builds.
+- The model-dependent stream tests are `#[ignore]`d and assert model availability instead of printing `SKIP` and passing; run them with `cargo test ... -- --ignored`.
+- Remove the obsolete `tests/api_coverage.rs` source-inventory harness and its `regex-lite` dependency. It counted symbol names rather than exercising behavior; macOS 27's new members exposed that mismatch. Native behavior is verified by the stream tests, typed error tests, and live smoke rather than re-pinning Apple's SDK inventory.
+
 ## [0.12.0] - 2026-09-24
 
 ### Security

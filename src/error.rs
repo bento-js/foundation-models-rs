@@ -81,6 +81,38 @@ impl AdapterAssetErrorContext {
     }
 }
 
+/// Typed detail reported by macOS 27's `LanguageModelError` family.
+///
+/// Each error case fills in a different subset, so every accessor is
+/// optional. The values come from Apple's own payload structs; none of them is
+/// parsed out of a localized message.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LanguageModelErrorDetails {
+    context_size: Option<usize>,
+    token_count: Option<usize>,
+    capability: Option<String>,
+}
+
+impl LanguageModelErrorDetails {
+    /// The model's context size, reported with a context-size overflow.
+    #[must_use]
+    pub const fn context_size(&self) -> Option<usize> {
+        self.context_size
+    }
+
+    /// The token count that overflowed the context size.
+    #[must_use]
+    pub const fn token_count(&self) -> Option<usize> {
+        self.token_count
+    }
+
+    /// The capability the model does not support, such as `"vision"`.
+    #[must_use]
+    pub fn capability(&self) -> Option<&str> {
+        self.capability.as_deref()
+    }
+}
+
 /// Typed tool-call failure metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallError {
@@ -230,6 +262,7 @@ struct ErrorMetadata {
     schema_error_context: Option<SchemaErrorContext>,
     refusal: Option<Refusal>,
     tool_call_error: Option<ToolCallError>,
+    language_model_error: Option<LanguageModelErrorDetails>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,6 +292,15 @@ struct BridgeToolCallError {
 }
 
 #[derive(Debug, Deserialize)]
+struct BridgeLanguageModelErrorDetails {
+    #[serde(rename = "contextSize")]
+    context_size: Option<usize>,
+    #[serde(rename = "tokenCount")]
+    token_count: Option<usize>,
+    capability: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct BridgeErrorPayload {
     message: String,
     #[serde(rename = "recoverySuggestion")]
@@ -274,6 +316,8 @@ struct BridgeErrorPayload {
     adapter_asset_error_context: Option<BridgeErrorContext>,
     #[serde(rename = "schemaErrorContext")]
     schema_error_context: Option<BridgeErrorContext>,
+    #[serde(rename = "languageModelError")]
+    language_model_error: Option<BridgeLanguageModelErrorDetails>,
 }
 
 impl BridgeErrorPayload {
@@ -303,6 +347,13 @@ impl BridgeErrorPayload {
                     ),
                     error.underlying_error,
                 )
+            }),
+            language_model_error: self.language_model_error.map(|details| {
+                LanguageModelErrorDetails {
+                    context_size: details.context_size,
+                    token_count: details.token_count,
+                    capability: details.capability,
+                }
             }),
         };
         ErrorMessage {
@@ -444,6 +495,15 @@ pub enum FMError {
     AdapterInvalidName(ErrorMessage),
     /// No compatible adapter could be found for the requested name.
     AdapterCompatibleNotFound(ErrorMessage),
+    /// The model does not support a requested capability, such as vision or
+    /// tool calling (macOS 27).
+    UnsupportedCapability(ErrorMessage),
+    /// The transcript contains content this model cannot consume (macOS 27).
+    UnsupportedTranscriptContent(ErrorMessage),
+    /// The request exceeded the model's time budget (macOS 27).
+    Timeout(ErrorMessage),
+    /// The transcript was mutated while the session was responding (macOS 27).
+    TranscriptMutationWhileResponding(ErrorMessage),
     /// The generation Task was cancelled before completion.
     Cancelled,
     /// An invalid argument crossed the FFI boundary (e.g. a NUL byte in a prompt).
@@ -487,6 +547,10 @@ impl FMError {
             | Self::AdapterInvalidAsset(message)
             | Self::AdapterInvalidName(message)
             | Self::AdapterCompatibleNotFound(message)
+            | Self::UnsupportedCapability(message)
+            | Self::UnsupportedTranscriptContent(message)
+            | Self::Timeout(message)
+            | Self::TranscriptMutationWhileResponding(message)
             | Self::InvalidArgument(message)
             | Self::Unknown { message, .. } => Some(message),
             Self::Cancelled => None,
@@ -516,6 +580,12 @@ impl FMError {
             Self::AdapterInvalidAsset(_) => ffi::status::ADAPTER_INVALID_ASSET,
             Self::AdapterInvalidName(_) => ffi::status::ADAPTER_INVALID_NAME,
             Self::AdapterCompatibleNotFound(_) => ffi::status::ADAPTER_COMPATIBLE_NOT_FOUND,
+            Self::UnsupportedCapability(_) => ffi::status::UNSUPPORTED_CAPABILITY,
+            Self::UnsupportedTranscriptContent(_) => ffi::status::UNSUPPORTED_TRANSCRIPT_CONTENT,
+            Self::Timeout(_) => ffi::status::TIMEOUT,
+            Self::TranscriptMutationWhileResponding(_) => {
+                ffi::status::TRANSCRIPT_MUTATION_WHILE_RESPONDING
+            }
             Self::Cancelled => ffi::status::CANCELLED,
             Self::InvalidArgument(_) => ffi::status::INVALID_ARGUMENT,
             Self::Unknown { code, .. } => *code,
@@ -540,6 +610,10 @@ impl FMError {
             | Self::AdapterInvalidAsset(message)
             | Self::AdapterInvalidName(message)
             | Self::AdapterCompatibleNotFound(message)
+            | Self::UnsupportedCapability(message)
+            | Self::UnsupportedTranscriptContent(message)
+            | Self::Timeout(message)
+            | Self::TranscriptMutationWhileResponding(message)
             | Self::InvalidArgument(message)
             | Self::Unknown { message, .. } => message.as_str(),
             Self::Cancelled => "generation cancelled",
@@ -586,6 +660,13 @@ impl FMError {
     #[must_use]
     pub fn tool_call_error(&self) -> Option<ToolCallError> {
         self.metadata()?.tool_call_error.clone()
+    }
+
+    /// Typed detail from macOS 27's `LanguageModelError` family, when the
+    /// bridge reported one.
+    #[must_use]
+    pub fn language_model_error_details(&self) -> Option<LanguageModelErrorDetails> {
+        self.metadata()?.language_model_error.clone()
     }
 }
 
@@ -656,6 +737,14 @@ pub(crate) fn from_swift_message(status: i32, raw_message: String) -> FMError {
         ffi::status::ADAPTER_INVALID_ASSET => FMError::AdapterInvalidAsset(message),
         ffi::status::ADAPTER_INVALID_NAME => FMError::AdapterInvalidName(message),
         ffi::status::ADAPTER_COMPATIBLE_NOT_FOUND => FMError::AdapterCompatibleNotFound(message),
+        ffi::status::UNSUPPORTED_CAPABILITY => FMError::UnsupportedCapability(message),
+        ffi::status::UNSUPPORTED_TRANSCRIPT_CONTENT => {
+            FMError::UnsupportedTranscriptContent(message)
+        }
+        ffi::status::TIMEOUT => FMError::Timeout(message),
+        ffi::status::TRANSCRIPT_MUTATION_WHILE_RESPONDING => {
+            FMError::TranscriptMutationWhileResponding(message)
+        }
         ffi::status::CANCELLED => FMError::Cancelled,
         ffi::status::INVALID_ARGUMENT => FMError::InvalidArgument(message),
         code => FMError::Unknown { code, message },
@@ -683,17 +772,15 @@ mod tests {
                 "generationErrorContext": { "debugDescription": "guardrail refusal" }
             })),
         );
-        let cloned = error.clone();
 
-        assert_eq!(error.recovery_suggestion(), cloned.recovery_suggestion());
-        assert_eq!(cloned.message(), "request refused");
+        assert_eq!(error.message(), "request refused");
         assert_eq!(
-            cloned.recovery_suggestion().as_deref(),
+            error.recovery_suggestion().as_deref(),
             Some("Try a safer prompt")
         );
-        assert_eq!(cloned.failure_reason().as_deref(), Some("Safety policy"));
+        assert_eq!(error.failure_reason().as_deref(), Some("Safety policy"));
         assert_eq!(
-            cloned
+            error
                 .generation_error_context()
                 .expect("generation context")
                 .debug_description(),
@@ -851,5 +938,73 @@ mod tests {
                 .debug_description(),
             "missing adapter metadata"
         );
+    }
+
+    #[test]
+    fn modern_status_codes_map_to_typed_variants() {
+        let cases = [
+            (
+                ffi::status::UNSUPPORTED_CAPABILITY,
+                FMError::UnsupportedCapability("vision is unsupported".into()),
+            ),
+            (
+                ffi::status::UNSUPPORTED_TRANSCRIPT_CONTENT,
+                FMError::UnsupportedTranscriptContent("vision is unsupported".into()),
+            ),
+            (
+                ffi::status::TIMEOUT,
+                FMError::Timeout("vision is unsupported".into()),
+            ),
+            (
+                ffi::status::TRANSCRIPT_MUTATION_WHILE_RESPONDING,
+                FMError::TranscriptMutationWhileResponding("vision is unsupported".into()),
+            ),
+        ];
+
+        for (status, expected) in cases {
+            let error = from_swift_message(status, "vision is unsupported".to_owned());
+            assert_eq!(error, expected, "status {status} mapped to {error:?}");
+            assert_eq!(error.code(), status);
+            assert_eq!(error.message(), "vision is unsupported");
+        }
+    }
+
+    #[test]
+    fn language_model_error_details_round_trip() {
+        let error = from_swift(
+            ffi::status::CONTEXT_WINDOW_EXCEEDED,
+            payload_ptr(json!({
+                "message": "context size exceeded",
+                "languageModelError": { "contextSize": 8192, "tokenCount": 9001 }
+            })),
+        );
+
+        let details = error
+            .language_model_error_details()
+            .expect("typed macOS 27 details");
+        assert_eq!(details.context_size(), Some(8192));
+        assert_eq!(details.token_count(), Some(9001));
+        assert_eq!(details.capability(), None);
+
+        let capability = from_swift(
+            ffi::status::UNSUPPORTED_CAPABILITY,
+            payload_ptr(json!({
+                "message": "vision is unsupported",
+                "languageModelError": { "capability": "vision" }
+            })),
+        );
+        assert_eq!(
+            capability
+                .language_model_error_details()
+                .expect("typed macOS 27 details")
+                .capability(),
+            Some("vision")
+        );
+
+        let plain = from_swift_message(
+            ffi::status::CONTEXT_WINDOW_EXCEEDED,
+            json!({ "message": "context size exceeded" }).to_string(),
+        );
+        assert_eq!(plain.language_model_error_details(), None);
     }
 }

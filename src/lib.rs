@@ -88,13 +88,17 @@ pub mod transcript;
 #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
 pub mod async_api;
 
+#[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+pub mod stream;
+
 pub use content::{
     Decimal, FromGeneratedContent, GeneratedContent, GeneratedContentKind, GenerationId,
     ToGeneratedContent,
 };
 pub use error::{
-    AdapterAssetErrorContext, ErrorMessage, FMError, GenerationErrorContext, Refusal,
-    SchemaErrorContext, ToolCallError, Unavailability,
+    AdapterAssetErrorContext, ErrorMessage, FMError, GenerationErrorContext,
+    LanguageModelErrorDetails, Refusal, SchemaErrorContext, ToolCallError, Unavailability,
 };
 pub use generation::{GenerationOptions, SamplingMode};
 pub use model::{

@@ -195,6 +195,15 @@ pub struct ConfiguredSystemLanguageModel {
     pub(crate) ptr: *mut c_void,
 }
 
+// SAFETY: `ptr` is a retained Swift object produced by
+// `Unmanaged.passRetained`. Swift's reference counting is thread-safe and Rust
+// never dereferences the pointer — it only travels through `extern "C"` calls
+// that hop to the Swift concurrency executor. This matches
+// `LanguageModelSession`, and it lets the asynchronous token-count futures be
+// held across an `await` in a spawned task.
+unsafe impl Send for ConfiguredSystemLanguageModel {}
+unsafe impl Sync for ConfiguredSystemLanguageModel {}
+
 impl ConfiguredSystemLanguageModel {
     /// Detailed availability of this configured model.
     #[must_use]
@@ -235,7 +244,6 @@ impl ConfiguredSystemLanguageModel {
     /// Returns an [`FMError`] if the prompt is invalid or the SDK rejects the request.
     #[cfg(feature = "async")]
     #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    #[allow(clippy::future_not_send)]
     pub async fn token_count(&self, prompt: impl ToPrompt) -> Result<usize, FMError> {
         let prompt = prompt.to_prompt()?;
         let pending = start_token_count(
@@ -248,7 +256,6 @@ impl ConfiguredSystemLanguageModel {
 
     #[cfg(feature = "async")]
     #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    #[allow(clippy::future_not_send)]
     pub async fn token_count_for_instructions(
         &self,
         instructions: impl ToInstructions,
@@ -264,7 +271,6 @@ impl ConfiguredSystemLanguageModel {
 
     #[cfg(feature = "async")]
     #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    #[allow(clippy::future_not_send)]
     pub async fn token_count_for_tools(&self, tools: &[Tool]) -> Result<usize, FMError> {
         let pending = start_token_count(
             self.ptr,
@@ -276,7 +282,6 @@ impl ConfiguredSystemLanguageModel {
 
     #[cfg(feature = "async")]
     #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    #[allow(clippy::future_not_send)]
     pub async fn token_count_for_schema(
         &self,
         schema: &GenerationSchema,
@@ -291,7 +296,6 @@ impl ConfiguredSystemLanguageModel {
 
     #[cfg(feature = "async")]
     #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    #[allow(clippy::future_not_send)]
     pub async fn token_count_for_transcript(
         &self,
         transcript: &Transcript,

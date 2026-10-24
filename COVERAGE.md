@@ -31,7 +31,7 @@ Audited against:
 | `ToolCallingMode` | ⏭️ skipped | n/a | No standalone public symbol in the macOS 26.5 `FoundationModels.swiftinterface`. |
 | `SystemPrompt` | ⏭️ skipped | n/a | No standalone public symbol in the macOS 26.5 `FoundationModels.swiftinterface`; system prompting is represented by `Instructions`. |
 | `Examples` | ⏭️ skipped | n/a | No standalone public symbol in the macOS 26.5 `FoundationModels.swiftinterface`. |
-| `Streaming` | ✅ implemented | `src/session/mod.rs` | Covered by `stream`, `stream_prompt`, `stream_generated`, `StreamEvent`, and `StructuredStreamEvent`. The SDK does not expose a standalone `Streaming` type. Streaming is synchronous (callback based); there is no async stream API yet. |
+| `Streaming` | ✅ implemented | `src/session/mod.rs`, `src/stream.rs` | Covered by the synchronous `stream`, `stream_prompt`, `stream_generated`, `StreamEvent` and `StructuredStreamEvent`, and by the asynchronous `stream_text` / `stream_generated_async`, which return a cancellable `Generation` with bounded transport and a native settlement handle. The SDK does not expose a standalone `Streaming` type. |
 
 ## Additional audited SDK items
 
@@ -41,6 +41,8 @@ Audited against:
 | `@Generable` / `@Guide` macros | ⏭️ skipped | Swift compile-time macros; Rust exposes runtime `Generable`, `GenerationGuide`, and `DynamicGenerationSchema` builders instead. |
 | `Foundation.Decimal` | ✅ implemented | Exposed as a string-backed `Decimal` with `Generable`, `FromGeneratedContent`, and `ToGeneratedContent` support. |
 | `LanguageModelSession.GenerationError.Context / Refusal / recoverySuggestion / failureReason` | ✅ implemented | Exposed via `GenerationErrorContext`, `Refusal`, and `FMError::{generation_error_context, recovery_suggestion, failure_reason, refusal}`. |
+| `LanguageModelError` (macOS 27) | implemented | Implemented in `swift-bridge/Sources/FoundationModelsBridge/ModernErrors.swift` and `src/error.rs`, behind `macos_27_0`. Every case maps to a typed `FMError` instead of `Unknown`; `contextSizeExceeded` and `unsupportedCapability` also carry Apple's payload fields through `FMError::language_model_error_details()`. |
+| `SystemLanguageModel.Error` / `LanguageModelSession.Error` / `GeneratedContent.ParsingError` (macOS 27) | implemented | Implemented in `swift-bridge/Sources/FoundationModelsBridge/ModernErrors.swift` and `src/error.rs`, behind `macos_27_0`. Mapped to `AssetsUnavailable`, `ConcurrentRequests` / `TranscriptMutationWhileResponding`, and `DecodingFailure`. |
 | `LanguageModelSession.ToolCallError.tool / underlyingError` | ✅ implemented | Exposed via `ToolCallError` and `FMError::tool_call_error()`. |
 | `GenerationSchema.SchemaError.Context / recoverySuggestion` | ✅ implemented | Exposed via `SchemaErrorContext` and `FMError::{schema_error_context, recovery_suggestion}`. |
 | `BackgroundAssets` companion integration | ❌ not provided | There is no BackgroundAssets interop in this crate; the former `backgroundassets` Cargo feature, which only re-exported the sibling crate, is removed. Depend on `backgroundassets` directly. The only SDK link, `SystemLanguageModel.Adapter.isCompatible(_ assetPack:)`, was deprecated in 26.4, is internal in the 26.5 interface and is gone from 27.0. |
@@ -49,7 +51,7 @@ Audited against:
 
 ## Not covered
 
-- The macOS 27.0 SDK additions: `PrivateCloudComputeLanguageModel`, `LanguageModelError` (which replaces the deprecated context-window error, so it maps to `FMError::Unknown` today), `ImageAttachment`, `ReasoningLevel`, `LanguageModelExecutor` and `ToolCallingMode`.
+- The macOS 27.0 SDK additions other than its error families: `PrivateCloudComputeLanguageModel`, `ImageAttachment`, `ReasoningLevel`, `LanguageModelExecutor` and `ToolCallingMode`. The `LanguageModelError`, `SystemLanguageModel.Error`, `LanguageModelSession.Error` and `GeneratedContent.ParsingError` families are implemented behind the `macos_27_0` feature.
 
 ## Verification
 
@@ -57,3 +59,6 @@ Audited against:
 - `cargo test --features macos_26_0`
 - `cargo clippy --all-features --all-targets -- -D warnings`
 - `for ex in 01_hello 02_streaming 03_instructions 04_options 05_async 06_smoke 07_schema_surface; do cargo run --example "$ex" --features "macos_26_0 async"; done`
+- `cargo test --features async,macos_26_0,macos_27_0`
+- `swift test --package-path swift-bridge -Xswiftc -DFOUNDATION_MODELS_HAS_MACOS26_SDK -Xswiftc -DFOUNDATION_MODELS_HAS_MACOS27_SDK`
+- `cargo run --release --features async,macos_26_0,macos_27_0 --example 10_async_stream_smoke`

@@ -13,7 +13,7 @@ permissions:
 jobs:
   test:
     name: Build, lint and test
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 60
     defaults:
       run:
@@ -23,11 +23,6 @@ jobs:
         with:
           path: foundation-models-rs
           persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: doom-fish/doom-fish-utils
-          path: doom-fish-utils
-          persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: stable
@@ -35,6 +30,18 @@ jobs:
       - run: cargo build --all-targets --all-features
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
+      - name: Swift bridge tests
+        run: |
+          sw_vers
+          sdk_major="$(xcrun --sdk macosx --show-sdk-version | cut -d. -f1)"
+          echo "macOS SDK: $(xcrun --sdk macosx --show-sdk-version)"
+          if [ "$sdk_major" -lt 27 ]; then
+            echo "The native bridge test lane requires macOS SDK 27 or newer." >&2
+            exit 1
+          fi
+          swift test --package-path swift-bridge \
+            -Xswiftc -DFOUNDATION_MODELS_HAS_MACOS26_SDK \
+            -Xswiftc -DFOUNDATION_MODELS_HAS_MACOS27_SDK
 
   msrv:
     name: Rust 1.82
@@ -47,11 +54,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           path: foundation-models-rs
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: doom-fish/doom-fish-utils
-          path: doom-fish-utils
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
@@ -69,11 +71,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           path: foundation-models-rs
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: doom-fish/doom-fish-utils
-          path: doom-fish-utils
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
