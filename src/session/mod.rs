@@ -519,6 +519,70 @@ impl LanguageModelSession {
         result
     }
 
+    /// Stream a text response asynchronously, with caller-owned cancellation.
+    ///
+    /// Unlike [`stream`](Self::stream) this parks no thread: the returned
+    /// [`Generation`](crate::stream::Generation) is polled like any other
+    /// future, dropping it cancels the native work, and its
+    /// [`GenerationHandle`](crate::stream::GenerationHandle) reports when that
+    /// work has settled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`FMError`] if the prompt cannot be encoded for Swift.
+    /// Generation failures arrive through the stream, not from this call.
+    #[cfg(feature = "async")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+    pub fn stream_text<P>(
+        &self,
+        prompt: P,
+        options: GenerationOptions,
+    ) -> Result<crate::stream::Generation, FMError>
+    where
+        P: ToPrompt,
+    {
+        let prompt = prompt.to_prompt()?;
+        let payload = respond_request_json(&prompt, options, None, true)?;
+        Ok(crate::stream::start_text_stream(
+            |context, callback| unsafe {
+                ffi::fm_session_stream_request_json(self.ptr, payload.as_ptr(), context, callback)
+            },
+        ))
+    }
+
+    /// Stream constrained generation asynchronously, with caller-owned
+    /// cancellation.
+    ///
+    /// Structured snapshots can rewrite earlier content, so they arrive as
+    /// [`GenerationUpdate::Snapshot`](crate::stream::GenerationUpdate::Snapshot)
+    /// rather than as append-only chunks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`FMError`] if the prompt or schema cannot be encoded for
+    /// Swift. Generation failures arrive through the stream.
+    #[cfg(feature = "async")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+    pub fn stream_generated_async<P>(
+        &self,
+        prompt: P,
+        schema: &GenerationSchema,
+        include_schema_in_prompt: bool,
+        options: GenerationOptions,
+    ) -> Result<crate::stream::Generation, FMError>
+    where
+        P: ToPrompt,
+    {
+        let prompt = prompt.to_prompt()?;
+        let payload =
+            respond_request_json(&prompt, options, Some(schema), include_schema_in_prompt)?;
+        Ok(crate::stream::start_structured_stream(
+            |context, callback| unsafe {
+                ffi::fm_session_stream_request_json(self.ptr, payload.as_ptr(), context, callback)
+            },
+        ))
+    }
+
     /// Log a feedback attachment and return the raw bytes Apple produced.
     ///
     /// # Errors
@@ -860,17 +924,17 @@ struct BridgeStructuredResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct BridgeStructuredSnapshot {
-    content: BridgeGeneratedContent,
+pub(crate) struct BridgeStructuredSnapshot {
+    pub(crate) content: BridgeGeneratedContent,
     #[serde(rename = "rawContent")]
-    raw_content: BridgeGeneratedContent,
+    pub(crate) raw_content: BridgeGeneratedContent,
     #[serde(rename = "isComplete")]
-    is_complete: bool,
+    pub(crate) is_complete: bool,
 }
 
 #[derive(Debug, Deserialize)]
-struct BridgeTextStreamSnapshot {
-    content: String,
+pub(crate) struct BridgeTextStreamSnapshot {
+    pub(crate) content: String,
 }
 
 pub(crate) fn respond_request_json(

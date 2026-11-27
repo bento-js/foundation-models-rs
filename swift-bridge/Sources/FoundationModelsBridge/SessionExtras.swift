@@ -224,43 +224,29 @@ public func fm_session_stream_request_json(
                 try Task.checkCancellation()
                 let entriesBefore = box.session.transcript.count
                 if let schema = request.schema {
-                    let stream = box.session.streamResponse(
-                        to: request.prompt,
-                        schema: schema,
-                        includeSchemaInPrompt: request.includeSchemaInPrompt,
-                        options: request.options
-                    )
-                    let cancelled: Bool
-                    do {
-                        for try await snapshot in stream {
-                            let payload = BridgeStructuredStreamSnapshot(
-                                content: BridgeGeneratedContent(json: snapshot.content.jsonString, generationID: nil),
-                                rawContent: BridgeGeneratedContent(json: snapshot.rawContent.jsonString, generationID: nil),
-                                isComplete: snapshot.content.isComplete
-                            )
-                            callback(context, ffiString(try encodeBridge(payload)), false, FM_OK)
-                        }
-                        cancelled = Task.isCancelled
-                        finishStream(cancelled: cancelled, context: context, callback: callback)
-                    } catch {
-                        cancelled = error is CancellationError || Task.isCancelled
-                        let lease = BridgeLease()
-                        defer { lease.end() }
-                        let (code, message) = mapError(error, lease: lease)
-                        callback(context, ffiString(message), true, code)
-                    }
-                    if cancelled {
-                        await settleCancelledStream(box.session, entriesBefore: entriesBefore)
-                    }
-                } else {
-                    let cancelled = await streamTextResponse(
-                        box.session.streamResponse(to: request.prompt, options: request.options),
+                    await runStructuredStream(
+                        session: box.session,
+                        stream: box.session.streamResponse(
+                            to: request.prompt,
+                            schema: schema,
+                            includeSchemaInPrompt: request.includeSchemaInPrompt,
+                            options: request.options
+                        ),
+                        entriesBefore: entriesBefore,
                         context: context,
                         callback: callback
                     )
-                    if cancelled {
-                        await settleCancelledStream(box.session, entriesBefore: entriesBefore)
-                    }
+                } else {
+                    await runTextStream(
+                        session: box.session,
+                        stream: box.session.streamResponse(
+                            to: request.prompt,
+                            options: request.options
+                        ),
+                        entriesBefore: entriesBefore,
+                        context: context,
+                        callback: callback
+                    )
                 }
             } catch {
                 let (code, message) = mapError(error)

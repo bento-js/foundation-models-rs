@@ -5,8 +5,8 @@ Safe, idiomatic Rust bindings for Apple's [FoundationModels](https://developer.a
 ## Features
 
 - **Sessions and multi-turn chat** — create, restore, inspect, and persist `LanguageModelSession`s
-- **Streaming** — text deltas and structured-generation snapshots
-- **Cancellation** — dropping a future, or leaving a stream early, cancels the generation; the next request on the session waits for it to wind down instead of failing with `ConcurrentRequests`
+- **Streaming** — text deltas and structured-generation snapshots, synchronously or as a cancellable `Generation` future
+- **Cancellation** — dropping a future or a `Generation`, or leaving a stream early, cancels the generation; the next request on the session waits for it to wind down instead of failing with `ConcurrentRequests`, and `GenerationHandle::settled` reports when the native work has actually finished
 - **Async API** — executor-agnostic `Future` wrappers for `respond(to:)`, `respond(to:generating:)`, and adapter lifecycle (see `async_api` module)
 - **Tool calling** — register Rust callbacks as `FoundationModels` `Tool`s
 - **Structured generation** — JSON-schema validation, dynamic schemas, string-choice schemas, array guides, explicit nil-representation helpers, and Rust `Generable` traits
@@ -16,19 +16,22 @@ Safe, idiomatic Rust bindings for Apple's [FoundationModels](https://developer.a
 - **Response / tool definitions** — `ResponseFormat::generating`, inferred `Tool::generable`, and transcript `ToolDefinition` helpers
 - **Typed error metadata** — `FMError` accessors for recovery suggestions, refusal helpers, tool-call details, and generation/schema/adapter-error contexts
 - **Feedback attachments** — full `LanguageModelFeedback` issue/sentiment support
+- **Typed macOS 27 errors** — behind `macos_27_0`, Apple's `LanguageModelError`, `SystemLanguageModel.Error`, `LanguageModelSession.Error`, and `GeneratedContent.ParsingError` map to typed `FMError` variants with their payload fields
 
 ## Requirements
 
-- macOS 26.0 or newer (build host **and** runtime)
+- macOS 26.0 or newer (build host **and** runtime); macOS 27.0 and the Xcode 27 SDK for the `macos_27_0` feature
 - Xcode 26 SDK
-- Apple Intelligence enabled in System Settings
-- Apple Silicon
 
 ## Installation
 
+These instructions use Bento's fork. The cancellable streaming API and macOS 27 error mapping are not in the published `0.12.0` crate. Commit `Cargo.lock` or replace the branch with an immutable `rev` when consuming the fork.
+
 ```toml
-[dependencies]
-foundation-models = { version = "0.12.0", features = ["macos_26_0"] }
+[dependencies.foundation-models]
+git = "https://github.com/bento-js/foundation-models-rs"
+branch = "bento/prompt-api"
+features = ["macos_26_0"]
 ```
 
 ## Async API
@@ -37,8 +40,10 @@ Enable the `async` feature to get executor-agnostic `Future` wrappers that
 work with any async runtime (Tokio, async-std, smol, pollster, …):
 
 ```toml
-[dependencies]
-foundation-models = { version = "0.12.0", features = ["macos_26_0", "async"] }
+[dependencies.foundation-models]
+git = "https://github.com/bento-js/foundation-models-rs"
+branch = "bento/prompt-api"
+features = ["macos_26_0", "async"]
 ```
 
 ```rust,no_run
@@ -68,14 +73,51 @@ pollster::block_on(async {
 | `AsyncAdapter::compile` | `SystemLanguageModel.Adapter.compile()` |
 | `SystemLanguageModel::token_count` | `SystemLanguageModel.tokenCount(for:)` |
 | `ConfiguredSystemLanguageModel::token_count_for_{instructions,tools,schema,transcript}` | `SystemLanguageModel.tokenCount(for:)` overloads (macOS 26.4+) |
+| `LanguageModelSession::stream_text` | `LanguageModelSession.streamResponse(to:)` |
+| `LanguageModelSession::stream_generated_async` | `LanguageModelSession.streamResponse(to:schema:)` |
 
 Futures own everything they need, so a session may be dropped while one is
 pending. Dropping a future cancels its generation, and async errors keep their
 `FMError` variant and metadata.
 
-> **Tier 2 note:** `LanguageModelSession.streamResponse(to:)` is an `AsyncSequence`
-> (multi-fire stream). It is deferred to Tier 2. Use `LanguageModelSession::stream`
-> for synchronous streaming today.
+### Cancellable streaming
+
+`stream_text` and `stream_generated_async` return a `Generation`: an ordinary future-based stream that parks no thread.
+
+```rust,no_run
+#[cfg(feature = "async")]
+use foundation_models::stream::GenerationUpdate;
+use foundation_models::{GenerationOptions, LanguageModelSession};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[cfg(feature = "async")]
+pollster::block_on(async {
+    let session = LanguageModelSession::new()?;
+    let mut generation =
+        session.stream_text("Tell me a haiku about Rust.", GenerationOptions::new())?;
+    let handle = generation.handle();
+
+    while let Some(update) = generation.next().await {
+        match update? {
+            GenerationUpdate::Chunk(delta) => print!("{delta}"),
+            GenerationUpdate::Replace(text) => println!("\n(rewritten) {text}"),
+            other => println!("{other:?}"),
+        }
+    }
+
+    // Wait for the native task before reusing or releasing the session.
+    handle.settled().await;
+    Ok::<(), Box<dyn std::error::Error>>(())
+})?;
+# Ok(())
+# }
+```
+
+- `handle.cancel()` requests native cancellation. A generation cancelled before completion reports `FMError::Cancelled`; an already completed generation retains its cached success. Dropping the `Generation` also requests cancellation.
+- `handle.settled()` resolves when the Swift task has really finished. For a cancelled request that includes waiting for `FoundationModels` to release it: cancelling makes the stream return normally, and the transcript rollback lands afterwards. Await it before reusing or releasing the session; the handle outlives the stream, so it also works after a drop. The bridge sets no deadline of its own — impose your own bound if you need one, and report a timeout rather than assuming completion.
+- Transport buffering is bounded by `stream::BOUNDED_UPDATE_CAPACITY`. Apple's snapshots are cumulative, so a slow consumer coalesces snapshots instead of blocking the model or losing text. Coalescing still cannot hide a rewrite of text you already received: it arrives as `Replace`, never appended as a delta.
+
+`LanguageModelSession::stream` remains the synchronous, callback-based API.
 
 ## Quick start
 
@@ -207,6 +249,7 @@ cargo run --example 07_schema_surface --features macos_26_0
 - Swift-only compile-time macros such as `@Generable` and `@Guide` are exposed as Rust runtime traits/builders (`Generable`, `GenerationGuide`, `DynamicGenerationSchema`).
 - There is no BackgroundAssets integration: the former `backgroundassets` feature only re-exported the sibling crate, and its one SDK link, `SystemLanguageModel.Adapter.isCompatible(_ assetPack:)`, was deprecated in macOS 26.4 and removed in 27.0. Depend on `backgroundassets` directly.
 - Text streams deliver `StreamEvent::Chunk` deltas cut from the full snapshot on UTF-8 boundaries, so concatenating them reproduces the reply even when a grapheme cluster grows across snapshots (ZWJ emoji, skin tones, combining marks). If the model rewrites text it already streamed, `StreamEvent::Replace` carries the whole new text.
+- The `macos_27_0` feature requires the Xcode 27 SDK at build time and macOS 27 at runtime. With an older SDK the build prints a warning and the macOS 27 error families stay unmapped rather than silently claiming support.
 - `GeneratedContent::generation_id()` returns the attached `GenerationId`. It owns the Swift `GenerationID` it names, which the bridge releases when the last clone is dropped; `best_effort_string()` and `Display` give its description. A `Refusal` taken from an error owns its Swift refusal the same way.
 - Typed generation/schema/adapter error metadata plus refusal helpers are available through `FMError::{generation_error_context, adapter_asset_error_context, schema_error_context, recovery_suggestion, failure_reason, refusal, tool_call_error}`.
 - Xcode 26.5's `FoundationModels.swiftinterface` does **not** expose standalone `PromptTag`, `Conversation`, `ToolCallingMode`, `SystemPrompt`, `Examples`, `LanguageModelInputContent`, `LanguageModelOutputContent`, or `Streaming` symbols; see [`COVERAGE.md`](COVERAGE.md) for the audited matrix.

@@ -104,6 +104,17 @@ struct BridgeErrorContext: Codable {
     var debugDescription: String
 }
 
+/// Typed detail carried by macOS 27's `LanguageModelError` family.
+///
+/// Every member is optional because each error case reports a different
+/// subset; the Rust side exposes them through
+/// `FMError::language_model_error_details()`.
+struct BridgeLanguageModelErrorDetails: Codable {
+    var contextSize: Int?
+    var tokenCount: Int?
+    var capability: String?
+}
+
 struct BridgeErrorPayload: Codable {
     var message: String
     var recoverySuggestion: String?
@@ -113,6 +124,7 @@ struct BridgeErrorPayload: Codable {
     var toolCallError: BridgeToolCallErrorPayload?
     var adapterAssetErrorContext: BridgeErrorContext?
     var schemaErrorContext: BridgeErrorContext?
+    var languageModelError: BridgeLanguageModelErrorDetails? = nil
 }
 
 struct BridgeToolOutput: Codable {

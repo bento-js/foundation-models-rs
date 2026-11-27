@@ -39,12 +39,18 @@ fn detect_sdk_root() -> Option<String> {
 /// enabled `macos_*` Cargo feature.
 fn configure_swift_version_defines(sdk_version: Option<u32>) -> Vec<String> {
     // (cargo_feature, min_sdk_major, swift_define)
-    let version_features: [(&str, u32, &str); 1] = [(
-        "CARGO_FEATURE_MACOS_26_0",
-        26,
-        "FOUNDATION_MODELS_HAS_MACOS26_SDK",
-    )];
-
+    let version_features: [(&str, u32, &str); 2] = [
+        (
+            "CARGO_FEATURE_MACOS_26_0",
+            26,
+            "FOUNDATION_MODELS_HAS_MACOS26_SDK",
+        ),
+        (
+            "CARGO_FEATURE_MACOS_27_0",
+            27,
+            "FOUNDATION_MODELS_HAS_MACOS27_SDK",
+        ),
+    ];
     let sdk_at_least = |min: u32| sdk_version.is_some_and(|v| v >= min);
 
     let mut define_flags: Vec<String> = Vec::new();

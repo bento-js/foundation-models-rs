@@ -37,6 +37,10 @@ pub type FmReleaseCallback = unsafe extern "C" fn(context: *mut c_void);
 pub type FmStreamCallback =
     unsafe extern "C" fn(context: *mut c_void, chunk: *mut c_char, done: bool, status: i32);
 
+/// Invoked once a bridge task's body has finished; see
+/// [`fm_task_await_settled`].
+pub type FmSettledCallback = unsafe extern "C" fn(context: *mut c_void);
+
 pub type FmToolCallback = unsafe extern "C" fn(
     context: *mut c_void,
     tool_name: *const c_char,
@@ -52,6 +56,19 @@ extern "C" {
     pub fn fm_object_release(ptr: *mut c_void);
     pub fn fm_object_retain(ptr: *mut c_void);
     pub fn fm_task_cancel(task: *mut c_void);
+    /// Register a settlement callback on a task handle.
+    ///
+    /// The callback runs exactly once, on an arbitrary thread, after the
+    /// task's body has finished — including a cancelled stream's transcript
+    /// rollback and the session request gate's release. A null task counts as
+    /// settled and invokes the callback immediately.
+    pub fn fm_task_await_settled(
+        task: *mut c_void,
+        context: *mut c_void,
+        callback: FmSettledCallback,
+    );
+    /// True once a task handle's body has finished. A null task is settled.
+    pub fn fm_task_is_settled(task: *mut c_void) -> bool;
 
     pub fn fm_system_model_is_available() -> bool;
     pub fn fm_system_model_availability_code() -> i32;
@@ -259,5 +276,9 @@ pub mod status {
     pub const ADAPTER_INVALID_ASSET: i32 = -14;
     pub const ADAPTER_INVALID_NAME: i32 = -15;
     pub const ADAPTER_COMPATIBLE_NOT_FOUND: i32 = -16;
+    pub const UNSUPPORTED_CAPABILITY: i32 = -17;
+    pub const UNSUPPORTED_TRANSCRIPT_CONTENT: i32 = -18;
+    pub const TIMEOUT: i32 = -19;
+    pub const TRANSCRIPT_MUTATION_WHILE_RESPONDING: i32 = -20;
     pub const UNKNOWN: i32 = -99;
 }

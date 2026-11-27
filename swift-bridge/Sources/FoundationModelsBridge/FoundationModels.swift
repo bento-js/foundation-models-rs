@@ -40,6 +40,10 @@ let FM_TOOL_CALL_FAILED: Int32 = -13
 let FM_ADAPTER_INVALID_ASSET: Int32 = -14
 let FM_ADAPTER_INVALID_NAME: Int32 = -15
 let FM_ADAPTER_COMPATIBLE_NOT_FOUND: Int32 = -16
+let FM_UNSUPPORTED_CAPABILITY: Int32 = -17
+let FM_UNSUPPORTED_TRANSCRIPT_CONTENT: Int32 = -18
+let FM_TIMEOUT: Int32 = -19
+let FM_TRANSCRIPT_MUTATION_WHILE_RESPONDING: Int32 = -20
 let FM_UNKNOWN: Int32 = -99
 
 // MARK: - String Helpers
@@ -218,6 +222,12 @@ func mapError(_ error: Error, lease: BridgeLease? = nil) -> (Int32, String) {
             schemaErrorContext: nil
         ))
     }
+
+#if FOUNDATION_MODELS_HAS_MACOS27_SDK
+    if #available(macOS 27.0, *), let mapped = mapModernError(error) {
+        return mapped
+    }
+#endif
 
     if let lmError = error as? LanguageModelSession.GenerationError {
         switch lmError {
