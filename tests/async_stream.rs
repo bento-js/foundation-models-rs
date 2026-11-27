@@ -144,7 +144,7 @@ fn cancel_mid_stream_reports_cancelled_then_settles_and_frees_the_session() {
     let mut terminal = None;
     while let Some(update) = pollster::block_on(generation.next()) {
         match update {
-            Ok(_) => continue,
+            Ok(_) => {}
             Err(error) => {
                 terminal = Some(error);
                 break;
@@ -304,7 +304,7 @@ fn a_second_stream_waits_for_the_cancelled_one() {
         .expect("second stream start");
     let second_handle = second.handle();
     let text = drain(&mut second).expect("second stream completes");
-    assert!(!text.trim().is_empty());
+    assert_ne!(text.trim(), "");
     await_settled(&second_handle);
     assert!(first_handle.is_settled());
 }
